@@ -1,0 +1,13 @@
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 3
+names: ['head', 'helmet', 'person']
+
+roboflow:
+  workspace: new-workspace-1ooxa
+  project: hardhat-rnwzx
+  version: 1
+  license: Public Domain
+  url: https://universe.roboflow.com/new-workspace-1ooxa/hardhat-rnwzx/dataset/1

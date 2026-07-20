@@ -1,0 +1,9 @@
+venv/
+train/
+valid/
+test/
+runs/
+__pycache__/
+*.pt
+*.zip
+*.pyc
