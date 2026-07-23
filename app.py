@@ -469,8 +469,8 @@ with col1:
     st.caption("💡 Baret modeli için optimal: **0.34**")
     helmet_conf = st.slider("Baret modeli güven eşiği", 0.1, 0.9, 0.34, 0.01, key="helmet_conf")
 with col2:
-    st.caption("💡 Yelek modeli için optimal: **0.585**")
-    vest_conf = st.slider("Yelek modeli güven eşiği", 0.1, 0.9, 0.585, 0.01, key="vest_conf")
+    st.caption("💡 Yelek modeli için optimal: **0.59**")
+    vest_conf = st.slider("Yelek modeli güven eşiği", 0.1, 0.9, 0.59, 0.01, key="vest_conf")
 
 st.markdown("---")
 image_tab, video_tab, camera_tab, zone_tab, dashboard_tab, settings_tab = st.tabs(
