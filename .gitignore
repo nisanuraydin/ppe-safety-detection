@@ -9,3 +9,7 @@ __pycache__/
 *.pyc
 dataset_vest/
 violations/
+temp_uploads/
+*.mp4
+referans_kare.jpg
+violations/
