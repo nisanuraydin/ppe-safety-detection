@@ -1,70 +1,89 @@
 # İş Güvenliği Görüntü Analizi
 
-Bu proje, fabrika ortamlarında iş güvenliği kurallarının yapay zekâ ile otomatik olarak takip edilmesini sağlayan bir görsel analiz sistemidir. Kamera görüntüleri ve videolar YOLO tabanlı bir model ile analiz edilerek iş ekipmanları (baret, yelek vb.) tespit edilebilir.
+Fabrika ve saha görüntülerinde kişisel koruyucu ekipman (PPE) kullanımını analiz eden Streamlit uygulaması. İki ayrı YOLO modeli ile baret, yelek, insan ve baretsiz kafa tespiti yapar.
 
 ## Özellikler
 
-- Fotoğraf yükleyerek iş güvenliği tespiti
-- Video dosyası yükleyerek video analizi
-- Canlı kamera üzerinden tek kare görüntü analizi
-- Varsayılan model ile otomatik yükleme
-- Hata yönetimi ve kullanıcıya açıklayıcı mesajlar
+- Fotoğraf ve video analizi
+- Yerel webcam, video dosyası, RTSP/HLS/MP4 bağlantısı ve YouTube canlı yayın kaynağı
+- Kişi başına baret/yelek uygunluğu kontrolü
+- Tehlikeli bölge tanımı, süreye bağlı kritik ihlal uyarısı ve snapshot kaydı
+- Canlı ihlal günlüğü, Dashboard ve Excel raporu
+- NVIDIA GPU mevcutsa CUDA ile hızlandırılmış analiz
 
-## Dosya yapısı
+## Model ve veri yapısı
 
-- `app.py` - Streamlit tabanlı uygulama kodu
-- `requirements.txt` - projenin Python bağımlılıkları
-- `runs/detect/train/weights/best.pt` - eğitimli model ağırlığı (varsa)
-- `yolov8n.pt`, `yolo26n.pt` - örnek ön yüklü model ağırlıkları
-- `README.dataset.txt` - kullanılan veri kümesi bilgisi
-- `README.roboflow.txt` - Roboflow veri kümesi açıklaması
+- `runs/detect/train/weights/best.pt`: baret modeli (`head`, `helmet`, `person`)
+- `runs/detect/train-2/weights/best.pt`: PPE modeli (`boots`, `gloves`, `helmet`, `human`, `vest`)
+- `data.yaml`: baret modeli veri kümesi yapılandırması
+- `dataset_vest/data.yaml`: PPE modeli veri kümesi yapılandırması
 
-## Gereksinimler
-
-- Python 3.10 veya üzeri (tercihen 3.11)
-- `pip` ile aşağıdaki paketler
+Veri kümesi kaynak bilgileri için [README.dataset.txt](README.dataset.txt) ve [README.roboflow.txt](README.roboflow.txt) dosyalarına bakın.
 
 ## Kurulum
 
-1. Proje dizinine gidin:
+Windows ve Python 3.11 önerilir.
 
 ```powershell
 cd C:\Users\casper\OneDrive\Desktop\ppe-detection
-```
-
-2. Sanal ortamı etkinleştirin (varsa):
-
-```powershell
-.\venv\Scripts\activate
-```
-
-3. Gerekli paketleri yükleyin:
-
-```powershell
+py -3.11 -m venv .venv311
+.\.venv311\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-## Uygulamayı Çalıştırma
-
-Aşağıdaki komutu çalıştırın:
+NVIDIA GPU için temel kurulumdan sonra CUDA PyTorch paketlerini yükleyin:
 
 ```powershell
-python -m streamlit run app.py
+pip install -r requirements-gpu.txt
 ```
 
-Tarayıcınız açılmazsa terminalde görünen `Local URL` adresini kopyalayıp tarayıcıya yapıştırın.
+## Çalıştırma
 
-## Kullanım
+VS Code'da yorumlayıcı olarak aşağıdaki dosyayı seçin:
 
-1. Uygulama varsayılan modeli otomatik olarak yükler.
-2. `Güven eşiği`ni ayarlayın.
-3. Fotoğraf yükleyip `Analiz Et` ile görsel tespiti çalıştırın.
-4. Video yükleyip `Videoyu Analiz Et` ile video analizi yapın.
-5. `Kameradan bir kare al` ile bağlı web kameranızdan tek kare görüntü tespiti yapın.
+```text
+.venv311\Scripts\python.exe
+```
+
+Ardından uygulamayı başlatın:
+
+```powershell
+.\.venv311\Scripts\python.exe -m streamlit run app.py
+```
+
+## Canlı kaynaklar
+
+Kamera sekmesinden aşağıdaki kaynaklar seçilebilir:
+
+- Bilgisayarın yerel webcam'i
+- Yüklenen bir video dosyası
+- Doğrudan `rtsp://`, HLS (`.m3u8`) veya MP4 bağlantısı
+- Herkese açık YouTube video ya da canlı yayın bağlantısı
+
+YouTube ve üçüncü taraf yayınlar için yalnızca kullanım izniniz olan veya herkese açık kaynakları kullanın. Web sayfası bağlantısı yerine doğrudan video/yayın bağlantısı gerekebilir.
 
 ## Notlar
 
-- Video analizi birden fazla kare üzerinde hesaplama yapar; bu nedenle işlem süresi videonun uzunluğuna göre uzayabilir.
-- Yüklenen modelin uyumlu bir YOLO `.pt` ağırlığı olması gerekir.
-- Uygulama önce `runs/detect/train/weights/best.pt` dosyasını arar. Bu dosya yoksa `yolov8n.pt` veya `yolo26n.pt` otomatik olarak fallback olarak kullanılır.
-- `README.dataset.txt` ve `README.roboflow.txt` dosyaları, bu projede kullanılan veri kümesiyle ilgili ek bilgileri içerir.
+- GPU kullanılabildiğinde Kamera sekmesinde `İşlem birimi: NVIDIA GPU` görünür.
+- `.venv311`, ihlal snapshot'ları ve geçici dosyalar Git takibine dahil edilmez.
+- İhlal istatistikleri mevcut uygulama oturumu boyunca tutulur; sayfa/oturum sıfırlandığında Dashboard sayaçları da sıfırlanır.
+
+## Test
+
+Arayüzden bağımsız tehlikeli bölge hesaplarını çalıştırmak için:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv311\Scripts\python.exe -m pytest -q
+```
+
+## Bilinen sınırlamalar
+
+- Bu çalışma eğitim ve portföy amaçlı bir prototiptir; gerçek iş güvenliği kararları için insan denetiminin yerine geçmez.
+- Tespit başarısı, kullanılan iki modelin eğitim verisi, kamera açısı, ışık ve görüntü kalitesinden etkilenir.
+- Çevrim içi yayınlarda gecikme ve bağlantı kararlılığı yayın sağlayıcısına bağlıdır.
+- Dashboard verileri yalnızca açık Streamlit oturumu boyunca saklanır.
+
+## Katkı ve lisans
+
+Geri bildirim ve geliştirme önerilerine açıktır. Proje [MIT Lisansı](LICENSE) ile yayımlanmıştır.

@@ -5,12 +5,20 @@ import tempfile
 import cv2
 import numpy as np
 import os
+import torch
 from datetime import datetime
 import time
+from io import BytesIO
+from urllib.parse import urlparse
+import pandas as pd
+from yt_dlp import YoutubeDL
 from streamlit_image_coordinates import streamlit_image_coordinates
+from app_helpers import get_absolute_zone, point_in_zone
 
 HELMET_MODEL_PATH = "runs/detect/train/weights/best.pt"
 VEST_MODEL_PATH = "runs/detect/train-2/weights/best.pt"
+INFERENCE_DEVICE = 0 if torch.cuda.is_available() else "cpu"
+INFERENCE_DEVICE_LABEL = "NVIDIA GPU" if torch.cuda.is_available() else "CPU"
 
 st.set_page_config(page_title="İş Güvenliği Görüntü Analizi", page_icon="🦺", layout="wide")
 st.title("🦺 İş Güvenliği Görüntü Analizi")
@@ -32,7 +40,11 @@ def log_violation(violation_type, annotated_frame_bgr):
     Bir ihlali günlüğe ekler ve o anın görüntüsünü diske kaydeder.
     Aynı ihlal türü için son SNAPSHOT_COOLDOWN_SECONDS saniye içinde
     zaten bir kayıt yapıldıysa, tekrar kaydetmez (spam'i önler).
+    Ayarlar sayfasından günlük/snapshot kapatılmışsa hiçbir şey yapmaz.
     """
+    if not st.session_state.get("settings_log_enabled", True):
+        return  # Ayarlardan günlük kapatılmış
+
     if "violation_log" not in st.session_state:
         st.session_state["violation_log"] = []
     if "last_snapshot_time" not in st.session_state:
@@ -44,12 +56,14 @@ def log_violation(violation_type, annotated_frame_bgr):
     if last_time is not None and (now - last_time).total_seconds() < SNAPSHOT_COOLDOWN_SECONDS:
         return  # çok yakın zamanda zaten kaydedildi, atla
 
-    ensure_violations_dir()
-    timestamp_str = now.strftime("%Y%m%d_%H%M%S")
-    safe_type = violation_type.replace(" ", "_")
-    filename = f"{timestamp_str}_{safe_type}.jpg"
-    filepath = os.path.join(VIOLATIONS_DIR, filename)
-    cv2.imwrite(filepath, annotated_frame_bgr)
+    filepath = None
+    if st.session_state.get("settings_snapshot_enabled", True):
+        ensure_violations_dir()
+        timestamp_str = now.strftime("%Y%m%d_%H%M%S")
+        safe_type = violation_type.replace(" ", "_")
+        filename = f"{timestamp_str}_{safe_type}.jpg"
+        filepath = os.path.join(VIOLATIONS_DIR, filename)
+        cv2.imwrite(filepath, annotated_frame_bgr)
 
     st.session_state["violation_log"].append({
         "zaman": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -74,29 +88,6 @@ def save_uploaded_file(uploaded_file, suffix):
         return temp_file.name
     except Exception as exc:
         raise RuntimeError("Yüklenen dosya geçici olarak kaydedilemedi.") from exc
-
-
-def point_in_zone(cx, cy, zone):
-    """Bir noktanın (cx, cy) dikdörtgen bölgenin (x1,y1,x2,y2) içinde olup olmadığını kontrol eder."""
-    x1, y1, x2, y2 = zone
-    return x1 <= cx <= x2 and y1 <= cy <= y2
-
-
-def get_absolute_zone(relative_zone, width, height):
-    """
-    Oransal (0-1 arası) bölge koordinatlarını, verilen görüntü/kare boyutuna göre
-    gerçek piksel koordinatlarına çevirir. Bu sayede bölge, referans fotoğraftan
-    farklı çözünürlükteki video/kamera karelerinde de doğru yerde çizilir.
-    """
-    if relative_zone is None:
-        return None
-    rx1, ry1, rx2, ry2 = relative_zone
-    return (
-        int(rx1 * width),
-        int(ry1 * height),
-        int(rx2 * width),
-        int(ry2 * height),
-    )
 
 
 def box_center_inside(inner_box, outer_box):
@@ -128,6 +119,88 @@ def resize_frame_max_dim(frame, max_dim=MAX_DIMENSION):
     return cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
+def zone_check_enabled():
+    return st.session_state.get("settings_zone_enabled", True)
+
+
+def is_supported_stream_url(stream_url):
+    """Doğrudan erişilebilen HLS/RTSP/video veya YouTube URL'si mi kontrol eder."""
+    parsed = urlparse(stream_url.strip())
+    if parsed.scheme not in {"http", "https", "rtsp", "rtsps"} or not parsed.netloc:
+        return False
+    return True
+
+
+def is_youtube_url(stream_url):
+    """URL'nin YouTube video ya da canlı yayın sayfası olup olmadığını kontrol eder."""
+    hostname = (urlparse(stream_url.strip()).hostname or "").lower()
+    return hostname in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
+
+
+def resolve_online_video_source(stream_url):
+    """YouTube bağlantısını OpenCV'nin okuyabileceği video akışına dönüştürür."""
+    if not is_supported_stream_url(stream_url):
+        raise ValueError("Geçerli bir http(s), rtsp veya rtsps yayın URL'si girin.")
+
+    if not is_youtube_url(stream_url):
+        return stream_url, "doğrudan yayın"
+
+    ydl_options = {
+        "format": "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 15,
+    }
+    with YoutubeDL(ydl_options) as ydl:
+        info = ydl.extract_info(stream_url, download=False)
+
+    video_url = info.get("url")
+    if not video_url:
+        raise RuntimeError("YouTube yayını için oynatılabilir video akışı bulunamadı.")
+    return video_url, "YouTube"
+
+
+def release_live_capture():
+    """Açık canlı kaynak varsa serbest bırakır."""
+    capture = st.session_state.pop("live_capture", None)
+    if capture is not None:
+        capture.release()
+
+
+def open_live_capture():
+    """Aktif canlı kaynak için düşük tamponlu bir OpenCV yakalayıcısı açar."""
+    config = st.session_state["live_stream_config"]
+    now = time.time()
+
+    if config.get("is_youtube") and (
+        not config.get("resolved_source") or now - config.get("resolved_at", 0) > 900
+    ):
+        resolved_source, source_label = resolve_online_video_source(config["original_source"])
+        config["resolved_source"] = resolved_source
+        config["source_label"] = source_label
+        config["resolved_at"] = now
+
+    source = config.get("resolved_source", config["original_source"])
+    capture = cv2.VideoCapture(source)
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    st.session_state["live_capture"] = capture
+    return capture
+
+
+def schedule_live_reconnect(reason):
+    """Bağlantı hatasında artan bekleme süresiyle yeniden denemeyi planlar."""
+    release_live_capture()
+    config = st.session_state["live_stream_config"]
+    failures = config.get("failure_count", 0) + 1
+    config["failure_count"] = failures
+    config["next_retry_at"] = time.time() + min(2 ** failures, 30)
+    config["last_error"] = reason
+    if config.get("is_youtube"):
+        # YouTube'un imzalı akış URL'si süreli olabilir; sonraki denemede yenilenir.
+        config["resolved_source"] = None
+
+
 def combined_predict(image, helmet_conf, vest_conf, helmet_model, vest_model, danger_zone=None, debug_centers=None):
     """
     İki modeli aynı görüntüde, KENDİ optimal güven eşikleriyle çalıştırır:
@@ -138,8 +211,8 @@ def combined_predict(image, helmet_conf, vest_conf, helmet_model, vest_model, da
     Böylece 'helmet' sınıfı iki modelde de olduğu için tekrar/çakışma olmaz;
     helmet_model'den yalnızca ihlal (head) bilgisi alınır.
     """
-    helmet_result = helmet_model.predict(image, conf=helmet_conf, verbose=False)[0]
-    vest_result = vest_model.predict(image, conf=vest_conf, verbose=False)[0]
+    helmet_result = helmet_model.predict(image, conf=helmet_conf, verbose=False, device=INFERENCE_DEVICE)[0]
+    vest_result = vest_model.predict(image, conf=vest_conf, verbose=False, device=INFERENCE_DEVICE)[0]
 
     annotated = vest_result.plot()
 
@@ -291,6 +364,8 @@ def annotate_video(input_path, output_path, helmet_conf, vest_conf, helmet_model
 
     # Oransal bölgeyi, bu videonun (küçültülmüş) çözünürlüğüne göre piksel koordinatına çevir
     danger_zone = get_absolute_zone(danger_zone_relative, width, height)
+    if not zone_check_enabled():
+        danger_zone = None
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
@@ -346,10 +421,22 @@ def annotate_video(input_path, output_path, helmet_conf, vest_conf, helmet_model
         if currently_in_violation:
             zone_intervals.append((violation_start_time, frame_index / fps))
 
+        # Model tespiti bazen tek bir karede "kaçırabilir" (flicker) — bu da tek bir
+        # uzun ihlali, aralarında kısa boşluklar olan birden fazla küçük parçaya bölebilir.
+        # Aralarında ZONE_GRACE_PERIOD'dan az boşluk olan aralıkları BİRLEŞTİRİYORUZ.
+        ZONE_GRACE_PERIOD = 1.5
+        merged_intervals = []
+        for start, end in zone_intervals:
+            if merged_intervals and (start - merged_intervals[-1][1]) < ZONE_GRACE_PERIOD:
+                # Önceki aralığa çok yakın, birleştir (bitişini uzat)
+                merged_intervals[-1] = (merged_intervals[-1][0], end)
+            else:
+                merged_intervals.append((start, end))
+
         # Süre eşiğinin altında kalan (anlık/yanlış alarm olabilecek) ihlalleri ele.
         # Kalanları (start, end, süre, kritik_mi) formatında döndür.
         filtered_intervals = []
-        for start, end in zone_intervals:
+        for start, end in merged_intervals:
             duration = end - start
             if duration >= min_violation_seconds:
                 filtered_intervals.append((start, end, duration, True))
@@ -386,7 +473,9 @@ with col2:
     vest_conf = st.slider("Yelek modeli güven eşiği", 0.1, 0.9, 0.585, 0.01, key="vest_conf")
 
 st.markdown("---")
-image_tab, video_tab, camera_tab, zone_tab = st.tabs(["Fotoğraf", "Video", "Kamera", "Tehlikeli Bölge"])
+image_tab, video_tab, camera_tab, zone_tab, dashboard_tab, settings_tab = st.tabs(
+    ["Fotoğraf", "Video", "Kamera", "Tehlikeli Bölge", "📊 Dashboard", "⚙️ Ayarlar"]
+)
 
 with image_tab:
     st.subheader("Fotoğraf Analizi")
@@ -399,11 +488,15 @@ with image_tab:
                 with st.spinner("Görsel analiz ediliyor..."):
                     relative_zone = st.session_state.get("danger_zone_relative")
                     danger_zone = get_absolute_zone(relative_zone, image.width, image.height)
+                    if not zone_check_enabled():
+                        danger_zone = None
                     annotated_bgr, summary, zone_violation = combined_predict(
                         image, helmet_conf, vest_conf, helmet_model, vest_model, danger_zone
                     )
                     annotated = annotated_bgr[:, :, ::-1]
-                    st.image(annotated, caption="Tespit sonucu", use_container_width=True)
+                    st.session_state["last_summary"] = summary
+                    st.session_state["last_summary_source"] = "Fotoğraf"
+                    st.image(annotated, caption="Tespit sonucu", width=700)
 
                     if zone_violation:
                         st.error("⚠️ Tehlikeli bölgede kişi tespit edildi!")
@@ -466,6 +559,7 @@ with video_tab:
 
 with camera_tab:
     st.subheader("Kamera Analizi")
+    st.caption(f"İşlem birimi: {INFERENCE_DEVICE_LABEL}")
 
     live_min_violation_seconds = st.slider(
         "Kritik ihlal için minimum bölgede kalma süresi (saniye)",
@@ -476,7 +570,7 @@ with camera_tab:
 
     source_choice = st.radio(
         "Kaynak seç",
-        ("Gerçek Webcam", "Video Dosyasını Canlı Simüle Et"),
+        ("Gerçek Webcam", "Video Dosyasını Canlı Simüle Et", "Online Video / Yayın URL'si"),
         key="camera_source_choice",
     )
 
@@ -489,7 +583,169 @@ with camera_tab:
             simulated_video_path = save_uploaded_file(sim_video_file, suffix=f".{sim_video_file.name.split('.')[-1]}")
             st.caption("Video, gerçek zamanına yakın bir hızda, canlı yayınmış gibi oynatılacak.")
 
-    run_webcam = st.checkbox("Başlat", key="webcam_toggle")
+    online_stream_url = None
+    if source_choice == "Online Video / Yayın URL'si":
+        online_stream_url = st.text_input(
+            "Video veya yayın URL'si",
+            placeholder="YouTube bağlantısı, https://ornek.com/yayin.m3u8 veya rtsp://kamera-adresi/stream",
+            help="YouTube video/canlı yayın bağlantısı ya da doğrudan HLS (.m3u8), MP4, RTSP/RSTPS yayın adresi girebilirsiniz.",
+            key="online_stream_url",
+        ).strip()
+        st.caption("Yalnızca kullanım izniniz olan veya herkese açık yayınları kullanın. YouTube akışlarının kullanılabilirliği yayın sahibine bağlıdır.")
+
+    if INFERENCE_DEVICE == 0:
+        target_analysis_fps = st.slider(
+            "Hedef analiz hızı (kare/sn)", 1, 20, 10,
+            help="RTX 4060 ile iki model GPU'da çalışıyor. Daha yüksek değer daha akıcı güncelleme sağlar.",
+            key="live_target_analysis_fps_gpu",
+        )
+    else:
+        target_analysis_fps = st.slider(
+            "Hedef analiz hızı (kare/sn)", 0.25, 2.0, 0.5, 0.25,
+            help="CPU kullanımında düşük değer gecikmeyi ve işlem yükünü azaltır.",
+            key="live_target_analysis_fps_cpu",
+        )
+    start_col, stop_col, status_col = st.columns([1, 1, 3])
+    start_clicked = start_col.button(
+        "Canlı Analizi Başlat", type="primary", disabled=st.session_state.get("live_stream_active", False)
+    )
+    stop_clicked = stop_col.button("Durdur", disabled=not st.session_state.get("live_stream_active", False))
+
+    if stop_clicked:
+        st.session_state["live_stream_active"] = False
+        release_live_capture()
+        st.rerun()
+
+    if start_clicked:
+        try:
+            if source_choice == "Video Dosyasını Canlı Simüle Et":
+                if simulated_video_path is None:
+                    raise ValueError("Önce simüle edilecek bir video yükle.")
+                source, source_label, is_youtube = simulated_video_path, "video simülasyonu", False
+            elif source_choice == "Online Video / Yayın URL'si":
+                if not online_stream_url:
+                    raise ValueError("Önce bir video veya yayın URL'si girin.")
+                source, source_label = resolve_online_video_source(online_stream_url)
+                is_youtube = is_youtube_url(online_stream_url)
+            else:
+                source, source_label, is_youtube = 0, "yerel webcam", False
+
+            release_live_capture()
+            st.session_state["live_stream_config"] = {
+                "original_source": online_stream_url if source_choice == "Online Video / Yayın URL'si" else source,
+                "resolved_source": source,
+                "source_label": source_label,
+                "is_youtube": is_youtube,
+                "resolved_at": time.time(),
+                "failure_count": 0,
+                "next_retry_at": 0,
+                "last_error": None,
+                "source_choice": source_choice,
+            }
+            st.session_state["live_stream_active"] = True
+            st.session_state["zone_entry_time"] = None
+            st.session_state["zone_last_seen_time"] = None
+            st.session_state["live_analysis_fps"] = None
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Canlı kaynak başlatılamadı: {exc}")
+
+    if st.session_state.get("live_stream_active", False):
+        status_col.success(f"Aktif kaynak: {st.session_state['live_stream_config']['source_label']}")
+    else:
+        status_col.info("Canlı analiz beklemede.")
+
+    @st.fragment(run_every=1 / target_analysis_fps)
+    def render_live_stream():
+        if not st.session_state.get("live_stream_active", False):
+            return
+
+        config = st.session_state["live_stream_config"]
+        now = time.time()
+        if now < config.get("next_retry_at", 0):
+            retry_in = config["next_retry_at"] - now
+            st.warning(f"Bağlantı yeniden deneniyor ({retry_in:.0f} sn): {config.get('last_error', '')}")
+            return
+
+        try:
+            capture = st.session_state.get("live_capture")
+            if capture is None or not capture.isOpened():
+                capture = open_live_capture()
+                if not capture.isOpened():
+                    schedule_live_reconnect("Kaynak açılamadı")
+                    st.warning("Kaynağa erişilemedi; yeniden denenecek.")
+                    return
+
+            ret, frame = capture.read()
+            if not ret and config["source_choice"] == "Video Dosyasını Canlı Simüle Et":
+                capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = capture.read()
+            if not ret:
+                schedule_live_reconnect("Yayından kare alınamadı")
+                st.warning("Kare alınamadı; bağlantı yeniden kurulacak.")
+                return
+
+            # Tamponda bekleyen eski kareleri atarak gecikmenin büyümesini önle.
+            for _ in range(2):
+                if not capture.grab():
+                    break
+                fresh_ret, fresh_frame = capture.retrieve()
+                if fresh_ret:
+                    frame = fresh_frame
+
+            started_at = time.time()
+            frame = resize_frame_max_dim(frame)
+            frame_height, frame_width = frame.shape[:2]
+            danger_zone = get_absolute_zone(st.session_state.get("danger_zone_relative"), frame_width, frame_height)
+            if not zone_check_enabled():
+                danger_zone = None
+            annotated, summary, zone_violation = combined_predict(
+                frame, helmet_conf, vest_conf, helmet_model, vest_model, danger_zone
+            )
+
+            processing_seconds = time.time() - started_at
+            instant_fps = 1 / processing_seconds if processing_seconds else 0
+            previous_fps = st.session_state.get("live_analysis_fps")
+            st.session_state["live_analysis_fps"] = instant_fps if previous_fps is None else 0.7 * previous_fps + 0.3 * instant_fps
+            config["failure_count"] = 0
+            config["last_error"] = None
+            st.session_state["last_summary"] = summary
+            st.session_state["last_summary_source"] = f"Kamera ({config['source_label']})"
+
+            st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), channels="RGB")
+            st.caption(f"Analiz hızı: {st.session_state['live_analysis_fps']:.1f} FPS | Hedef: {target_analysis_fps} FPS")
+
+            zone_grace_period = 1.5
+            alarm_enabled = st.session_state.get("settings_alarm_enabled", True)
+            if zone_violation:
+                if st.session_state.get("zone_entry_time") is None:
+                    st.session_state["zone_entry_time"] = time.time()
+                st.session_state["zone_last_seen_time"] = time.time()
+                time_in_zone = time.time() - st.session_state["zone_entry_time"]
+                if time_in_zone >= live_min_violation_seconds:
+                    if alarm_enabled:
+                        st.error(f"🔴 KRİTİK İHLAL: Kişi tehlikeli bölgede {time_in_zone:.1f} saniyedir bulunuyor!")
+                    log_violation("Kritik Tehlikeli Bölge İhlali", annotated)
+                elif alarm_enabled:
+                    st.warning(f"⚠️ Kişi tehlikeli bölgede ({time_in_zone:.1f} sn, {live_min_violation_seconds:.1f} sn sonra kritik sayılacak)")
+            else:
+                last_seen = st.session_state.get("zone_last_seen_time")
+                if last_seen is None or time.time() - last_seen >= zone_grace_period:
+                    st.session_state["zone_entry_time"] = None
+                    st.session_state["zone_last_seen_time"] = None
+
+            if summary.get("head (baretsiz)", 0) > 0:
+                log_violation("Baretsiz (No-Helmet)", annotated)
+            st.write("**Tespit özeti:** " + (", ".join(f"{name}: {count}" for name, count in summary.items()) if summary else "Bu karede tespit yok."))
+        except Exception as exc:
+            schedule_live_reconnect(str(exc))
+            st.warning(f"Canlı akış hatası; yeniden denenecek: {exc}")
+
+    if st.session_state.get("live_stream_active", False):
+        render_live_stream()
+
+    # Önceki blok tek bir while döngüsüyle Streamlit arayüzünü kilitliyordu.
+    run_webcam = False
     frame_placeholder = st.empty()
     warning_placeholder = st.empty()
     summary_placeholder = st.empty()
@@ -502,6 +758,16 @@ with camera_tab:
                 st.warning("Önce simüle edilecek bir video yükle.")
                 st.stop()
             video_source = simulated_video_path
+        elif source_choice == "Online Video / Yayın URL'si":
+            if not online_stream_url:
+                st.warning("Önce bir video veya yayın URL'si girin.")
+                st.stop()
+            try:
+                video_source, source_label = resolve_online_video_source(online_stream_url)
+                st.caption(f"Kaynak hazırlandı: {source_label}")
+            except Exception as exc:
+                st.error(f"Online kaynak hazırlanamadı: {exc}")
+                st.stop()
         else:
             video_source = 0
 
@@ -522,6 +788,9 @@ with camera_tab:
                         # Video bittiğinde başa sar, canlı yayın hissi sürsün
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         continue
+                    elif source_choice == "Online Video / Yayın URL'si":
+                        st.error("Online yayından kare alınamadı. Yayın adresini ve erişim iznini kontrol edin.")
+                        break
                     else:
                         st.error("Kamera görüntüsü alınamadı.")
                         break
@@ -529,14 +798,20 @@ with camera_tab:
                 frame = resize_frame_max_dim(frame)  # büyük fotoğraf/videolarda kutu/yazı orantısız oluyordu
                 frame_height, frame_width = frame.shape[:2]
                 danger_zone = get_absolute_zone(danger_zone_relative, frame_width, frame_height)
+                if not zone_check_enabled():
+                    danger_zone = None
 
                 annotated, summary, zone_violation = combined_predict(
                     frame, helmet_conf, vest_conf, helmet_model, vest_model, danger_zone
                 )
+                st.session_state["last_summary"] = summary
+                st.session_state["last_summary_source"] = "Kamera"
                 annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
                 frame_placeholder.image(annotated_rgb, channels="RGB")
 
                 ZONE_GRACE_PERIOD = 1.5  # bu süre içinde tespit kaçırılırsa sayaç sıfırlanmaz
+
+                alarm_enabled = st.session_state.get("settings_alarm_enabled", True)
 
                 if zone_violation:
                     # Bölgede ne zamandır olduğunu takip et
@@ -547,11 +822,12 @@ with camera_tab:
                     time_in_zone = time.time() - st.session_state["zone_entry_time"]
 
                     if time_in_zone >= live_min_violation_seconds:
-                        warning_placeholder.error(
-                            f"🔴 KRİTİK İHLAL: Kişi tehlikeli bölgede {time_in_zone:.1f} saniyedir bulunuyor!"
-                        )
+                        if alarm_enabled:
+                            warning_placeholder.error(
+                                f"🔴 KRİTİK İHLAL: Kişi tehlikeli bölgede {time_in_zone:.1f} saniyedir bulunuyor!"
+                            )
                         log_violation("Kritik Tehlikeli Bölge İhlali", annotated)
-                    else:
+                    elif alarm_enabled:
                         warning_placeholder.warning(
                             f"⚠️ Kişi tehlikeli bölgede ({time_in_zone:.1f} sn, {live_min_violation_seconds:.1f} sn sonra kritik sayılacak)"
                         )
@@ -560,7 +836,7 @@ with camera_tab:
                     if last_seen is not None and (time.time() - last_seen) < ZONE_GRACE_PERIOD:
                         # Tespit büyük ihtimalle anlık kaçtı (flicker), sayacı KORU
                         entry_time = st.session_state.get("zone_entry_time")
-                        if entry_time is not None:
+                        if entry_time is not None and alarm_enabled:
                             time_in_zone = time.time() - entry_time
                             warning_placeholder.warning(
                                 f"⚠️ Kişi tehlikeli bölgede ({time_in_zone:.1f} sn, tespit anlık kaçtı)"
@@ -726,3 +1002,117 @@ with zone_tab:
         if st.button("Tehlikeli Bölgeyi Sil"):
             del st.session_state["danger_zone_relative"]
             st.rerun()
+
+with dashboard_tab:
+    st.subheader("📊 Canlı Dashboard")
+
+    last_summary = st.session_state.get("last_summary")
+    last_source = st.session_state.get("last_summary_source", "-")
+
+    if last_summary is None:
+        st.info("Henüz bir analiz yapılmadı. Fotoğraf veya Kamera sekmesinden bir analiz çalıştır.")
+    else:
+        st.caption(f"Son analiz kaynağı: {last_source}")
+
+        total_workers = last_summary.get("human", 0)
+        ppe_ok = last_summary.get("✅ PPE Uygun", 0)
+        ppe_violation = last_summary.get("❌ PPE İhlali", 0)
+        zone_violation_count = last_summary.get("danger_zone_violation", 0)
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("👷 Toplam Çalışan", total_workers)
+        col2.metric("✅ PPE Uygun", ppe_ok)
+        col3.metric("❌ PPE İhlali", ppe_violation)
+        col4.metric("🚧 Bölge İhlali", zone_violation_count)
+
+    st.divider()
+    st.subheader("Bu Oturumdaki İhlal İstatistikleri")
+
+    violation_log = st.session_state.get("violation_log", [])
+    if len(violation_log) == 0:
+        st.info("Henüz kaydedilmiş bir ihlal yok.")
+    else:
+        type_counts = {}
+        for entry in violation_log:
+            type_counts[entry["tur"]] = type_counts.get(entry["tur"], 0) + 1
+
+        total_violations = len(violation_log)
+        most_common_type, most_common_count = max(type_counts.items(), key=lambda item: item[1])
+        metric_col, common_col, type_col = st.columns(3)
+        metric_col.metric("Toplam Kayıt", total_violations)
+        common_col.metric("En Sık İhlal", most_common_type, f"{most_common_count} kayıt")
+        type_col.metric("Farklı İhlal Türü", len(type_counts))
+
+        stats_df = pd.DataFrame(
+            [
+                {
+                    "İhlal Türü": violation_type,
+                    "Kayıt Sayısı": count,
+                    "Oran": f"{count / total_violations:.0%}",
+                }
+                for violation_type, count in type_counts.items()
+            ]
+        ).sort_values("Kayıt Sayısı", ascending=False, ignore_index=True)
+
+        table_col, chart_col = st.columns([3, 2])
+        with table_col:
+            st.dataframe(stats_df, hide_index=True, use_container_width=True)
+        with chart_col:
+            st.bar_chart(stats_df.set_index("İhlal Türü")[["Kayıt Sayısı"]], use_container_width=True)
+
+        st.divider()
+        st.subheader("📄 Otomatik Rapor Oluştur")
+
+        report_df = pd.DataFrame(violation_log)[["zaman", "tur", "dosya"]]
+        report_df.columns = ["Zaman", "İhlal Türü", "Fotoğraf Dosyası"]
+
+        excel_buffer = BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            report_df.to_excel(writer, index=False, sheet_name="İhlal Raporu")
+
+            summary_df = pd.DataFrame(
+                [{"İhlal Türü": tur, "Adet": count} for tur, count in type_counts.items()]
+            )
+            summary_df.to_excel(writer, index=False, sheet_name="Özet")
+
+        st.download_button(
+            "📥 Excel Raporu İndir (.xlsx)",
+            data=excel_buffer.getvalue(),
+            file_name=f"ihlal_raporu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+with settings_tab:
+    st.subheader("⚙️ Sistem Ayarları")
+    st.write("Bu ayarlar, tüm sekmelerdeki analiz davranışını etkiler.")
+
+    st.toggle(
+        "🚧 Tehlikeli Bölge Kontrolü Aktif",
+        value=st.session_state.get("settings_zone_enabled", True),
+        key="settings_zone_enabled",
+        help="Kapatılırsa, tanımlı bölge olsa bile hiçbir bölge kontrolü yapılmaz.",
+    )
+    st.toggle(
+        "🔔 Alarm / Uyarı Sistemi Aktif",
+        value=st.session_state.get("settings_alarm_enabled", True),
+        key="settings_alarm_enabled",
+        help="Kapatılırsa, canlı kamera ekranında ihlal uyarı mesajları gösterilmez (kayıt yine de tutulabilir).",
+    )
+    st.toggle(
+        "📸 Otomatik Snapshot Kaydı Aktif",
+        value=st.session_state.get("settings_snapshot_enabled", True),
+        key="settings_snapshot_enabled",
+        help="Kapatılırsa, ihlal anında fotoğraf diske kaydedilmez (günlük kaydı yine tutulabilir).",
+    )
+    st.toggle(
+        "📋 İhlal Günlüğü Aktif",
+        value=st.session_state.get("settings_log_enabled", True),
+        key="settings_log_enabled",
+        help="Kapatılırsa, hiçbir ihlal günlüğe eklenmez ve fotoğraf kaydedilmez.",
+    )
+
+    st.divider()
+    st.caption(
+        "Güven eşikleri (baret/yelek modeli) sayfanın üst kısmındaki kaydırıcılardan, "
+        "kritik ihlal süresi ise Video ve Kamera sekmelerindeki kaydırıcılardan ayarlanır."
+    )
