@@ -1,10 +1,10 @@
-# Baret modeli veri kümesi
+# Helmet Dataset
 
-`data.yaml` dosyasındaki baret modeli veri kümesi Roboflow Universe üzerindeki **hardhat v1** veri kümesinden alınmıştır.
+This project uses the **Hard Hat v1** dataset for the helmet-detection model.
 
-- Sınıflar: `head`, `helmet`, `person`
-- Bölümler: 3.500 eğitim, 1.000 doğrulama, 500 test görseli
-- Lisans: Public Domain
-- Kaynak: https://universe.roboflow.com/new-workspace-1ooxa/hardhat-rnwzx
+- Classes: `head`, `helmet`, `person`
+- Split sizes: 3,500 training images, 1,000 validation images, and 500 test images
+- License: Public Domain
+- Source: [Roboflow Universe - Hard Hat Dataset](https://universe.roboflow.com/roboflow-100/hard-hat-uzc7d)
 
-Bu veri kümesi `runs/detect/train/weights/best.pt` modelinin eğitiminde kullanılmıştır.
+The local dataset configuration is stored in `data.yaml`.
