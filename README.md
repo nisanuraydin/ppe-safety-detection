@@ -1,83 +1,130 @@
 # PPE Safety Detection
 
-A Streamlit application that analyzes personal protective equipment (PPE) use in factory and worksite images. It uses two YOLO models to detect helmets, safety vests, people, and unprotected heads.
+This is an AI-based PPE detection project developed with Streamlit and YOLO.
+It detects personal protective equipment in workplace images and videos,
+including people, helmets, safety vests, and unprotected heads.
 
 ## Features
 
 - Image and video analysis
-- Local webcam, uploaded video, RTSP/HLS/MP4 URL, and public YouTube live-stream sources
-- Per-person helmet and vest compliance checks
-- Configurable danger zone, time-based critical-violation alerts, and snapshot capture
-- Live violation log, dashboard, and Excel report export
-- CUDA-accelerated inference when an NVIDIA GPU is available
+- Webcam and online-stream support
+- Helmet and safety-vest checks
+- Custom danger-zone selection
+- Violation warnings and snapshot saving
+- A simple dashboard with Excel report export
+- GPU support when CUDA is available
 
-## Models and datasets
+## Models
 
-- `runs/detect/train/weights/best.pt`: helmet model (`head`, `helmet`, `person`)
-- `runs/detect/train-2/weights/best.pt`: PPE model (`boots`, `gloves`, `helmet`, `human`, `vest`)
-- `data.yaml`: configuration for the helmet dataset
-- `dataset_vest/data.yaml`: configuration for the PPE dataset
+The application uses two trained models:
 
-See [README.dataset.txt](README.dataset.txt) and [README.roboflow.txt](README.roboflow.txt) for dataset source information.
+- `runs/detect/train/weights/best.pt`
+  - Classes: `head`, `helmet`, `person`
+- `runs/detect/train-2/weights/best.pt`
+  - Classes: `boots`, `gloves`, `helmet`, `human`, `vest`
 
-## Setup
+The detections from both models are combined to check whether a person is
+wearing a helmet and safety vest.
 
-Windows and Python 3.11 are recommended.
+## Datasets
+
+The helmet model was trained with the Hard Hat dataset, and the PPE model was
+trained with the Construction PPE Detection dataset.
+
+More information about the datasets can be found in
+[README.dataset.txt](README.dataset.txt) and
+[README.roboflow.txt](README.roboflow.txt).
+
+## Installation
+
+Python 3.11 is recommended.
+
+```bash
+git clone https://github.com/nisanuraydin/ppe-safety-detection.git
+cd ppe-safety-detection
+```
+
+Create a virtual environment and install the dependencies.
+
+### Windows
 
 ```powershell
-cd C:\Users\casper\OneDrive\Desktop\ppe-detection
 py -3.11 -m venv .venv311
 .\.venv311\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-For an NVIDIA GPU, install the CUDA-enabled PyTorch packages after the base dependencies:
+### Linux / macOS
 
-```powershell
+```bash
+python3.11 -m venv .venv311
+source .venv311/bin/activate
+pip install -r requirements.txt
+```
+
+For NVIDIA GPU support:
+
+```bash
 pip install -r requirements-gpu.txt
 ```
 
-## Run the app
+The GPU requirements currently use the CUDA 12.1 version of PyTorch. If CUDA is
+not available, the application runs on the CPU.
 
-In VS Code, select this interpreter:
+## Running the application
 
-```text
-.venv311\Scripts\python.exe
+```bash
+python -m streamlit run app.py
 ```
 
-Then start the app:
+The application includes separate tabs for:
 
-```powershell
-.\.venv311\Scripts\python.exe -m streamlit run app.py
-```
+- Photo analysis
+- Video analysis
+- Camera and live-stream analysis
+- Danger-zone selection
+- Dashboard
+- Settings
 
 ## Live sources
 
-The Camera page supports the following sources:
+The camera tab supports a local webcam, uploaded videos, direct RTSP/HLS/MP4
+URLs, and public YouTube streams.
 
-- Your computer's local webcam
-- An uploaded video file
-- Direct `rtsp://`, HLS (`.m3u8`), or MP4 URLs
-- Public YouTube video and live-stream URLs
+Only use cameras and streams that you have permission to access. Some online
+streams may stop working when their source URL changes.
 
-Only use sources that you have permission to access. Some providers require a direct stream URL instead of a webpage URL, and their stream availability may change over time.
+## Project structure
+
+```text
+ppe-safety-detection/
+├── app.py
+├── app_helpers.py
+├── data.yaml
+├── dataset_vest/
+├── runs/detect/
+├── tests/
+├── violations/
+└── requirements.txt
+```
 
 ## Tests
 
-Run the UI-independent danger-zone tests with:
-
-```powershell
-.\.venv311\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv311\Scripts\python.exe -m pytest -q
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
-## Limitations
+## Notes
 
-- This is an educational portfolio prototype and is not a replacement for human safety supervision.
-- Detection quality depends on the training data, camera angle, lighting, and video quality.
-- Online-stream latency and reliability depend on the stream provider.
-- Dashboard data is kept only for the active Streamlit session.
+- Detection results can change depending on lighting, camera angle, distance,
+  and video quality.
+- The danger zone is rectangular and is saved only for the current session.
+- Dashboard and violation data are also kept only during the active Streamlit
+  session.
+- This is a portfolio project and should not be used as the only workplace
+  safety control.
 
 ## License
 
-This project is distributed under the [MIT License](LICENSE).
+This project is available under the [MIT License](LICENSE).
